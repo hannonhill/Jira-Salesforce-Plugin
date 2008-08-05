@@ -4,6 +4,12 @@ import com.atlassian.jira.event.issue.AbstractIssueEventListener;
 import com.atlassian.jira.event.issue.IssueEventListener;
 import java.util.Map;
 
+import com.atlassian.mail.server.MailServerManager;
+import com.atlassian.mail.MailFactory;
+import com.atlassian.mail.Email;
+import com.atlassian.mail.server.SMTPMailServer;
+import com.atlassian.mail.MailException;
+
 /* Classes Generated from the Sforce enterprise.wsdl file */
 import com.sforce.soap.enterprise.*;
 import com.sforce.soap.enterprise.fault.ExceptionCode;
@@ -13,6 +19,9 @@ import com.sforce.soap.enterprise.sobject.*;
 
 /* These classes are standard with the Jira installation */
 import com.atlassian.jira.issue.Issue;
+import com.atlassian.jira.ManagerFactory;
+import com.atlassian.jira.config.properties.ApplicationProperties;
+import com.atlassian.jira.config.properties.APKeys;
 import com.atlassian.jira.issue.ModifiedValue;
 import com.atlassian.jira.issue.util.IssueChangeHolder;
 import com.atlassian.jira.issue.util.DefaultIssueChangeHolder;
@@ -25,18 +34,20 @@ import com.atlassian.jira.issue.fields.CustomField;
 public class SalesforceConnectorListener extends AbstractIssueEventListener
 		implements IssueEventListener {
 	
-	private String _uName, _password, _token;
-
+	private String _uName, _password, _token, _emails;
+	private String[] _projects;
+	
 	public void init(Map params){		
 		this._uName = (String) params.get("Salesforce Username");
 		this._password = (String) params.get("Salesforce Password");
 		this._token = (String) params.get("Salesforce Security Token");
-		System.out.println(this._password);
+		this._emails = (String) params.get("Notification Emails");
+		this._projects = ((String) params.get("Jira Project Keys")).replace(" ", "").split("'");
 	}
 	
 	public String[] getAcceptedParams(){
 		/* These are the parameters for administrators to configure in Jira */
-		String[] params = {"Salesforce Username", "Salesforce Password", "Salesforce Security Token"};
+		String[] params = {"Salesforce Username", "Salesforce Password", "Salesforce Security Token", "Jira Project Keys", "Notification Emails"};
 		return params;
 	}
 	
@@ -243,150 +254,198 @@ public class SalesforceConnectorListener extends AbstractIssueEventListener
 		return null;
 	}
 	
+	public static boolean searchArrayForString(String[] haystack, String needle)
+	{
+		for(int i=haystack.length-1; i >= 0; i--)
+		{
+			if(haystack[i].equalsIgnoreCase(needle)){
+				return true;
+			}
+		}
+		return false;
+	}
+	
+	public void sendMissingContactNotification(Issue issue) throws MailException
+	{
+		String baseUrl = ManagerFactory.getApplicationProperties().getString(APKeys.JIRA_BASEURL);
+		MailServerManager mailManager = MailFactory.getServerManager();
+		SMTPMailServer mailServer = mailManager.getDefaultSMTPMailServer();
+		com.atlassian.mail.Email email = new com.atlassian.mail.Email (this._emails, mailServer.getDefaultFrom(), "");
+		email.setSubject("Missing Jira Contact in Salesforce: " + issue.getReporter().getFullName());
+		email.setBody("Please create a corresponding contact in Salesforce for the appropriate account with the name " + issue.getReporter().getFullName() + "and the email address " + issue.getReporter().getEmail()+" then update the issue " + baseUrl + "/browse/" +issue.getKey());		
+		mailServer.send(email);
+	}
+	
 	public void issueCreated(IssueEvent event)
 	{
-		//The custom field manager is used to create Ojbects to govern the cusom fields in Jira
-		CustomFieldManager customFieldManager = ComponentManager.getInstance().getCustomFieldManager();
-		
-		//System.out.println("Starting to send case to Salesforce");
-		SoapBindingStub binding = login(this._uName, this._password + this._token);
-		
 		Issue i = event.getIssue();
 		
-		
-		IssueChangeHolder changeHolder = new DefaultIssueChangeHolder();
-		
-		if(i.getReporter() != null && i.getAssignee() != null)
+		if(searchArrayForString(this._projects, i.getProjectObject().getKey()))
 		{
-			String conEmail = ((com.opensymphony.user.User)(i.getReporter())).getEmail();
-			String uEmail = ((com.opensymphony.user.User)(i.getAssignee())).getEmail();
+		
+			//The custom field manager is used to create Ojbects to govern the cusom fields in Jira
+			CustomFieldManager customFieldManager = ComponentManager.getInstance().getCustomFieldManager();
 			
-			String[] contactInfo = getContactInfoByEmail(conEmail, binding);
-			String[] uInfo = getUserInfoByEmail(uEmail, binding);
-			if(uInfo == null || contactInfo == null)
+			//System.out.println("Starting to send case to Salesforce");
+			SoapBindingStub binding = login(this._uName, this._password + this._token);
+			
+			
+			
+			IssueChangeHolder changeHolder = new DefaultIssueChangeHolder();
+			
+			if(i.getReporter() != null && i.getAssignee() != null)
 			{
-				System.out.println("Id's returned as Blank " + conEmail + " " + uEmail);
-				return;
+				String conEmail = ((com.opensymphony.user.User)(i.getReporter())).getEmail();
+				String uEmail = ((com.opensymphony.user.User)(i.getAssignee())).getEmail();
 				
-			}		
-			String caseId = createCase(uInfo[0], contactInfo[0], contactInfo[1], i.getIssueType().get("name").toString(), i.getSummary(), i.getDescription(), i.getKey(), binding );
-			
-			String[] accountInfo = getAccountInfoById(contactInfo[1], binding);
-			
-			//create the custom field objects 
-			CustomField cfAccountName = customFieldManager.getCustomFieldObjectByName("Salesforce Account");
-			CustomField cfAccountUrl = customFieldManager.getCustomFieldObjectByName("Salesforce Address");
-			CustomField cfAccountOwner = customFieldManager.getCustomFieldObjectByName("Salesforce Account Owner");
-			CustomField cfContactName = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Name");
-			CustomField cfContactEmail = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Email");
-			CustomField cfContactPhone = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Phone");
-			CustomField cfCaseId = customFieldManager.getCustomFieldObjectByName("Salesforce Case Id");
-			
-			//set the values of the custom fields, see http://confluence.atlassian.com/pages/viewpage.action?pageId=160835
-			cfAccountName.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfAccountName), accountInfo[0]), changeHolder);
-			cfAccountUrl.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfAccountUrl), "https://na2.salesforce.com/"+ contactInfo[1]), changeHolder);
-			
-			String ownerName = getUserNameById(accountInfo[1], binding);
-			cfAccountOwner.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfAccountOwner), ownerName), changeHolder);
-			
-			cfContactName.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactName), contactInfo[2]), changeHolder);
-			cfContactEmail.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactEmail), contactInfo[4]), changeHolder);
-			cfContactPhone.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactPhone), contactInfo[3]), changeHolder);
-			cfCaseId.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfCaseId), caseId), changeHolder);
+				String[] contactInfo = getContactInfoByEmail(conEmail, binding);
+				String[] uInfo = getUserInfoByEmail(uEmail, binding);
+				if(uInfo == null || contactInfo == null)
+				{
+					System.out.println("Id's returned as Blank " + conEmail + " " + uEmail);
+					System.out.println("Id's returned as Blank");
+					try{
+						sendMissingContactNotification(i);
+					}catch(MailException ex){
+						System.out.println(ex);
+					}					
+					return;
+					
+				}		
+				String caseId = createCase(uInfo[0], contactInfo[0], contactInfo[1], i.getIssueType().get("name").toString(), i.getSummary(), i.getDescription(), i.getKey(), binding );
+				
+				String[] accountInfo = getAccountInfoById(contactInfo[1], binding);
+				
+				//create the custom field objects 
+				CustomField cfAccountName = customFieldManager.getCustomFieldObjectByName("Salesforce Account");
+				CustomField cfAccountUrl = customFieldManager.getCustomFieldObjectByName("Salesforce Address");
+				CustomField cfAccountOwner = customFieldManager.getCustomFieldObjectByName("Salesforce Account Owner");
+				CustomField cfContactName = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Name");
+				CustomField cfContactEmail = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Email");
+				CustomField cfContactPhone = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Phone");
+				CustomField cfCaseId = customFieldManager.getCustomFieldObjectByName("Salesforce Case Id");
+				
+				//set the values of the custom fields, see http://confluence.atlassian.com/pages/viewpage.action?pageId=160835
+				cfAccountName.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfAccountName), accountInfo[0]), changeHolder);
+				cfAccountUrl.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfAccountUrl), "https://na2.salesforce.com/"+ contactInfo[1]), changeHolder);
+				
+				String ownerName = getUserNameById(accountInfo[1], binding);
+				cfAccountOwner.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfAccountOwner), ownerName), changeHolder);
+				
+				cfContactName.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactName), contactInfo[2]), changeHolder);
+				cfContactEmail.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactEmail), contactInfo[4]), changeHolder);
+				cfContactPhone.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactPhone), contactInfo[3]), changeHolder);
+				cfCaseId.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfCaseId), caseId), changeHolder);
+			}
 		}
 	}
 	
 	public void issueUpdated(IssueEvent event)
 	{
-		CustomFieldManager customFieldManager = ComponentManager.getInstance().getCustomFieldManager();
-		CustomField cfCaseId = customFieldManager.getCustomFieldObjectByName("Salesforce Case Id");
 		Issue i = event.getIssue();
 		
-		if(i.getCustomFieldValue(cfCaseId) == null || i.getCustomFieldValue(cfCaseId) == "")
+		if(searchArrayForString(this._projects, i.getProjectObject().getKey()))
 		{
-			System.out.println("Starting to send case to Salesforce");
-			SoapBindingStub binding = login(this._uName, this._password + this._token);
-						
-			CustomField cfAccountName = customFieldManager.getCustomFieldObjectByName("Salesforce Account");
-			CustomField cfAccountUrl = customFieldManager.getCustomFieldObjectByName("Salesforce Address");
-			CustomField cfAccountOwner = customFieldManager.getCustomFieldObjectByName("Salesforce Account Owner");
-			CustomField cfContactName = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Name");
-			CustomField cfContactEmail = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Email");
-			CustomField cfContactPhone = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Phone");
+		
+			CustomFieldManager customFieldManager = ComponentManager.getInstance().getCustomFieldManager();
+			CustomField cfCaseId = customFieldManager.getCustomFieldObjectByName("Salesforce Case Id");
 			
-			IssueChangeHolder changeHolder = new DefaultIssueChangeHolder();
 			
-			String conEmail = ((com.opensymphony.user.User)(i.getReporter())).getEmail();
-			String uEmail = ((com.opensymphony.user.User)(i.getAssignee())).getEmail();
-			
-			String[] contactInfo = getContactInfoByEmail(conEmail, binding);
-			String[] uInfo = getUserInfoByEmail(uEmail, binding);
-			if(uInfo == null || contactInfo == null)
+			if(i.getCustomFieldValue(cfCaseId) == null || i.getCustomFieldValue(cfCaseId) == "")
 			{
-				System.out.println("Id's returned as Blank");
-				return;
-				
-			}		
-			String caseId = createCase(uInfo[0], contactInfo[0], contactInfo[1], i.getIssueType().get("name").toString(), i.getSummary(), i.getDescription(), i.getKey(), binding );
-			
-			String[] accountInfo = getAccountInfoById(contactInfo[1], binding);
-			
-			cfAccountName.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfAccountName), accountInfo[0]), changeHolder);
-			cfAccountUrl.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfAccountUrl), "https://na2.salesforce.com/"+ contactInfo[1]), changeHolder);
-			
-			String ownerName = getUserNameById(accountInfo[1], binding);
-			cfAccountOwner.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfAccountOwner), ownerName), changeHolder);
-			
-			cfContactName.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactName), contactInfo[2]), changeHolder);
-			cfContactEmail.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactEmail), contactInfo[4]), changeHolder);
-			cfContactPhone.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactPhone), contactInfo[3]), changeHolder);
-			cfCaseId.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfCaseId), caseId), changeHolder);
-		}else{
-			System.out.println("Starting to send case to Salesforce");
-			SoapBindingStub binding = login(this._uName, this._password + this._token);
-			
-			String conEmail = ((com.opensymphony.user.User)(i.getReporter())).getEmail();
-			//System.out.println(conEmail + ", " + getContactEmailById(getContactIdByCase((String)i.getCustomFieldValue(cfCaseId), binding),binding));
-			if(conEmail != getContactEmailById(getContactIdByCase((String)i.getCustomFieldValue(cfCaseId), binding),binding))
-			{
-				String[] contactInfo = getContactInfoByEmail(conEmail, binding);
-				updateCaseContact((String)i.getCustomFieldValue(cfCaseId), contactInfo[0], contactInfo[1], binding);
-				
-				CustomField cfContactName = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Name");
-				CustomField cfContactEmail = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Email");
-				CustomField cfContactPhone = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Phone");
+				System.out.println("Starting to send case to Salesforce");
+				SoapBindingStub binding = login(this._uName, this._password + this._token);
+							
 				CustomField cfAccountName = customFieldManager.getCustomFieldObjectByName("Salesforce Account");
 				CustomField cfAccountUrl = customFieldManager.getCustomFieldObjectByName("Salesforce Address");
 				CustomField cfAccountOwner = customFieldManager.getCustomFieldObjectByName("Salesforce Account Owner");
+				CustomField cfContactName = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Name");
+				CustomField cfContactEmail = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Email");
+				CustomField cfContactPhone = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Phone");
 				
 				IssueChangeHolder changeHolder = new DefaultIssueChangeHolder();
 				
-				cfContactName.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactName), contactInfo[2]), changeHolder);
-				cfContactEmail.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactEmail), contactInfo[4]), changeHolder);
-				cfContactPhone.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactPhone), contactInfo[3]), changeHolder);
+				String conEmail = ((com.opensymphony.user.User)(i.getReporter())).getEmail();
+				String uEmail = ((com.opensymphony.user.User)(i.getAssignee())).getEmail();
+				
+				String[] contactInfo = getContactInfoByEmail(conEmail, binding);
+				String[] uInfo = getUserInfoByEmail(uEmail, binding);
+				if(uInfo == null || contactInfo == null)
+				{
+					System.out.println("Id's returned as Blank");
+					try{
+						sendMissingContactNotification(i);
+					}catch(MailException ex){
+						System.out.println(ex);
+					}
+					return;
+					
+				}		
+				String caseId = createCase(uInfo[0], contactInfo[0], contactInfo[1], i.getIssueType().get("name").toString(), i.getSummary(), i.getDescription(), i.getKey(), binding );
 				
 				String[] accountInfo = getAccountInfoById(contactInfo[1], binding);
 				
 				cfAccountName.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfAccountName), accountInfo[0]), changeHolder);
 				cfAccountUrl.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfAccountUrl), "https://na2.salesforce.com/"+ contactInfo[1]), changeHolder);
+				
 				String ownerName = getUserNameById(accountInfo[1], binding);
 				cfAccountOwner.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfAccountOwner), ownerName), changeHolder);
+				
+				cfContactName.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactName), contactInfo[2]), changeHolder);
+				cfContactEmail.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactEmail), contactInfo[4]), changeHolder);
+				cfContactPhone.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactPhone), contactInfo[3]), changeHolder);
+				cfCaseId.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfCaseId), caseId), changeHolder);
+			}else{
+				System.out.println("Starting to send case to Salesforce");
+				SoapBindingStub binding = login(this._uName, this._password + this._token);
+				
+				String conEmail = ((com.opensymphony.user.User)(i.getReporter())).getEmail();
+				//System.out.println(conEmail + ", " + getContactEmailById(getContactIdByCase((String)i.getCustomFieldValue(cfCaseId), binding),binding));
+				if(conEmail != getContactEmailById(getContactIdByCase((String)i.getCustomFieldValue(cfCaseId), binding),binding))
+				{
+					String[] contactInfo = getContactInfoByEmail(conEmail, binding);
+					updateCaseContact((String)i.getCustomFieldValue(cfCaseId), contactInfo[0], contactInfo[1], binding);
+					
+					CustomField cfContactName = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Name");
+					CustomField cfContactEmail = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Email");
+					CustomField cfContactPhone = customFieldManager.getCustomFieldObjectByName("Salesforce Contact Phone");
+					CustomField cfAccountName = customFieldManager.getCustomFieldObjectByName("Salesforce Account");
+					CustomField cfAccountUrl = customFieldManager.getCustomFieldObjectByName("Salesforce Address");
+					CustomField cfAccountOwner = customFieldManager.getCustomFieldObjectByName("Salesforce Account Owner");
+					
+					IssueChangeHolder changeHolder = new DefaultIssueChangeHolder();
+					
+					cfContactName.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactName), contactInfo[2]), changeHolder);
+					cfContactEmail.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactEmail), contactInfo[4]), changeHolder);
+					cfContactPhone.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfContactPhone), contactInfo[3]), changeHolder);
+					
+					String[] accountInfo = getAccountInfoById(contactInfo[1], binding);
+					
+					cfAccountName.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfAccountName), accountInfo[0]), changeHolder);
+					cfAccountUrl.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfAccountUrl), "https://na2.salesforce.com/"+ contactInfo[1]), changeHolder);
+					String ownerName = getUserNameById(accountInfo[1], binding);
+					cfAccountOwner.updateValue(null, i, new ModifiedValue(i.getCustomFieldValue(cfAccountOwner), ownerName), changeHolder);
+				}
 			}
 		}
 	}
 	
 	public void issueClosed(IssueEvent event)
 	{
-		CustomFieldManager customFieldManager = ComponentManager.getInstance().getCustomFieldManager();
-		CustomField cfCaseId = customFieldManager.getCustomFieldObjectByName("Salesforce Case Id");
 		Issue i = event.getIssue();
-		String caseId = (String)i.getCustomFieldValue(cfCaseId);
-		if(caseId != null && caseId != "")
+		if(searchArrayForString(this._projects, i.getProjectObject().getKey()))
 		{
-			System.out.println("Starting to send case to Salesforce");
-			SoapBindingStub binding = login(this._uName, this._password + this._token);
+			CustomFieldManager customFieldManager = ComponentManager.getInstance().getCustomFieldManager();
+			CustomField cfCaseId = customFieldManager.getCustomFieldObjectByName("Salesforce Case Id");
 			
-			closeCase(caseId, binding);
+			String caseId = (String)i.getCustomFieldValue(cfCaseId);
+			if(caseId != null && caseId != "")
+			{
+				System.out.println("Starting to send case to Salesforce");
+				SoapBindingStub binding = login(this._uName, this._password + this._token);
+				
+				closeCase(caseId, binding);
+			}
 		}
 	}
 	
