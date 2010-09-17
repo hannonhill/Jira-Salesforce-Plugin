@@ -47,7 +47,7 @@ public class SalesforceConnectorListener extends AbstractIssueEventListener
 		this._password = (String) params.get("Salesforce Password");//Salesforce login password
 		this._token = (String) params.get("Salesforce Security Token");//Salesforce Security Token
 		this._emails = (String) params.get("Notification Emails");//Email Addresses to send notifications
-		this._projects = ((String) params.get("Jira Project Keys")).replace(" ", "").split("'");//Projects to create casses for
+		this._projects = ((String) params.get("Jira Project Keys")).replace(" ", "").split("'");//Projects to create cases for
 	}
 	
 	/**
@@ -391,7 +391,7 @@ public class SalesforceConnectorListener extends AbstractIssueEventListener
 	{
 		String baseUrl = ManagerFactory.getApplicationProperties().getString(APKeys.JIRA_BASEURL);
 		com.atlassian.mail.Email email = new com.atlassian.mail.Email (this._emails);
-		email.setSubject("Jira-Saleforce Sync Failed: " + issue.getKey());
+		email.setSubject("Jira-Salesforce Sync Failed: " + issue.getKey());
 		email.setBody(baseUrl + "/browse/" +issue.getKey() + " " + ex.toString());
 		try{
 			sendEmail(email);
